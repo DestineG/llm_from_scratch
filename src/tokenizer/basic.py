@@ -1,7 +1,6 @@
 # src/tokenizer/basic.py
 
 import re
-import hashlib
 from collections import Counter
 
 from src.data.rawdata_handler import iter_wmt_en, iter_wmt_zh
@@ -12,7 +11,7 @@ class Vocab:
                  counter,
                  max_size: int = -1,
                  min_freq: int = 1,
-                 special_tokens=["<pad>", "<unk>"]
+                 special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"]
     ):
         """
         counter: 一个 Counter 对象，统计了 token 的频率
@@ -45,18 +44,18 @@ class Vocab:
     def id2token(self, id_: int) -> str:
         return self.id_to_token.get(id_, "<unk>")
 
-
 class BasicTokenizer:
     def __init__(self, vocab, tokenizer=lambda text: [token.strip() for token in re.split(r'\s+|(?=[，。！？,.!?:;])|(?<=[，。！？,.!?:;])', text.strip()) if token.strip()]):
         self.vocab = vocab
+        self.n_vocab = len(vocab)
         self.tokenizer = tokenizer
 
-    def tokenize(self, text: str) -> list[int]:
+    def encode(self, text: str) -> list[int]:
         textList = self.tokenizer(text)
         ret = [self.vocab.token2id(token) for token in textList]
         return ret
     
-    def detokenize(self, token_ids: list[int]) -> str:
+    def decode(self, token_ids: list[int]) -> str:
         tokens = [self.vocab.id2token(id_) for id_ in token_ids]
         return ' '.join(tokens)
 
@@ -69,6 +68,20 @@ def build_counter(
     for text in source:
         tokens = tokenizer(text)
         counter.update(tokens)
+    return counter
+
+def build_counter_from_pair(
+        source,
+        tokenizer=lambda text: [token.strip() for token in re.split(r'\s+|(?=[，。！？,.!?:;])|(?<=[，。！？,.!?:;])', text.strip()) if token.strip()],
+) -> Counter:
+    counter = Counter()
+    print("Building token frequency counter...")
+    for text in source[0]:
+        tks = tokenizer(text)
+        counter.update(tks)
+    for text in source[1]:
+        tks = tokenizer(text)
+        counter.update(tks)
     return counter
 
 def build_tokenizer_from_wmt_en(
@@ -119,20 +132,6 @@ def build_tokenizer_from_wmt_zh(
     tokenizer = BasicTokenizer(vocab, tokenizer=tokenizer)
     return tokenizer
 
-def build_counter_from_pair(
-        source,
-        tokenizer=lambda text: [token.strip() for token in re.split(r'\s+|(?=[，。！？,.!?:;])|(?<=[，。！？,.!?:;])', text.strip()) if token.strip()],
-) -> Counter:
-    counter = Counter()
-    print("Building token frequency counter...")
-    for text in source[0]:
-        tks = tokenizer(text)
-        counter.update(tks)
-    for text in source[1]:
-        tks = tokenizer(text)
-        counter.update(tks)
-    return counter
-
 def build_tokenizer_from_wmt_en_zh(
         limit: int = 10000,
         max_size: int = -1,
@@ -167,8 +166,8 @@ def test():
     tokenizer = build_tokenizer_from_wmt_en(limit=limit)
 
     text = "hello unknown token ! . ,"
-    tokens = tokenizer.tokenize(text)
-    token_ids = tokenizer.detokenize(tokens)
+    tokens = tokenizer.encode(text)
+    token_ids = tokenizer.decode(tokens)
 
     print("len(vocab):", len(tokenizer.vocab))
     print("Text:", text)
@@ -179,8 +178,8 @@ def test():
     tokenizer_zh = build_tokenizer_from_wmt_zh(limit=limit)
 
     text_zh = "你好 ，未知 的 标点符号 电脑 手机 古人 ！ 。 ,"
-    tokens_zh = tokenizer_zh.tokenize(text_zh)
-    token_ids_zh = tokenizer_zh.detokenize(tokens_zh)
+    tokens_zh = tokenizer_zh.encode(text_zh)
+    token_ids_zh = tokenizer_zh.decode(tokens_zh)
 
     print("len(vocab):", len(tokenizer_zh.vocab))
     print("Text (ZH):", text_zh)
@@ -191,13 +190,28 @@ def test():
     tokenizer_en_zh = build_tokenizer_from_wmt_en_zh(limit=limit)
 
     text_en_zh = ("hello unknown token ! . ,", "你好 ，未知 的 标点符号 电脑 手机 古人 ！ 。 ,")
-    tokens_en_zh = tokenizer_en_zh.tokenize(text_en_zh[0]) + tokenizer_en_zh.tokenize(text_en_zh[1])
-    token_ids_en_zh = tokenizer_en_zh.detokenize(tokens_en_zh)
+    tokens_en_zh = tokenizer_en_zh.encode(text_en_zh[0]) + tokenizer_en_zh.encode(text_en_zh[1])
+    token_ids_en_zh = tokenizer_en_zh.decode(tokens_en_zh)
 
     print("len(vocab):", len(tokenizer_en_zh.vocab))
     print("Text (EN-ZH):", text_en_zh)
     print("Tokens (EN-ZH):", tokens_en_zh)
     print("Token IDs (EN-ZH):", token_ids_en_zh)
 
+
+import tiktoken
 if __name__ == "__main__":
-    test()
+    # test()
+
+    tokenizer = tiktoken.get_encoding("gpt2")
+    text = "hello unknown token ! <|endoftext|> . , sixteen sixDocker"
+    
+    # 显式允许识别此特殊标记
+    tokens = tokenizer.encode(text, allowed_special={'<|endoftext|>'})
+    
+    # 注意：encode 返回的是 ID 列表，decode 返回的是文本
+    decoded_text = tokenizer.decode(tokens)
+    
+    print("Original Text:", text)
+    print("Tokens (IDs):", tokens)
+    print("Decoded Text:", decoded_text)

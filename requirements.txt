@@ -1,2 +1,4 @@
 pandas==2.3.3
 tqdm==4.67.1
+numpy==2.4.0
+torch==2.9.1
