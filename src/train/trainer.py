@@ -15,7 +15,7 @@ def get_cosine_schedule_with_warmup(
     optimizer,
     num_warmup_steps=2000,
     num_training_steps=None,
-    num_cycles=0.5,
+    min_lr_ratio=0.1,
 ):
     def lr_lambda(current_step):
         # Warmup阶段：线性从0升至1
@@ -26,12 +26,12 @@ def get_cosine_schedule_with_warmup(
         if current_step >= num_training_steps:
             return 0.0
         
-        # Cosine衰减阶段：从1衰减至0.05
+        # Cosine衰减阶段：从1衰减至0.05，衰减曲线为cos[0, pi]
         # progress 从 0 -> 1
         progress = float(current_step - num_warmup_steps) / float(
             max(1, num_training_steps - num_warmup_steps)
         )
-        cosine_decay = 0.5 * (0.1 + math.cos(math.pi * num_cycles * progress))
+        cosine_decay = min_lr_ratio + (1.0 - min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
         return max(0.0, cosine_decay)
     return LambdaLR(optimizer, lr_lambda)
 
@@ -144,7 +144,7 @@ model_config = {
 save_steps = 20000
 log_steps = 500
 exps_dir = "./experiments"
-exp_name = "gpt_owt_en_bpeTokenizer_with_warmup"
+exp_name = "gpt_owt_en_bpeTokenizer_with_warmup_v2"
 exp_dir = os.path.abspath(os.path.join(exps_dir, exp_name))
 if os.path.exists(exp_dir):
     shutil.rmtree(exp_dir)   # 删除整个目录（包括所有文件和子目录）
