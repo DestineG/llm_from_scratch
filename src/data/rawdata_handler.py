@@ -3,6 +3,7 @@
 import os
 import csv
 from tqdm import tqdm
+import pyarrow.parquet as pq
 
 
 def wmt_zh_en_training_corpus_csv_to_txt(force_rebuild: bool = False) -> tuple[str, str]:
@@ -82,11 +83,7 @@ def iter_wmt_en(limit: int = -1):
             if limit != -1 and count >= limit:
                 break
 
-
-# head data/raw/wmt_zh_en_training_corpus/wmt_zh_en_training_corpus.txt
-# head data/raw/wmt_zh_en_training_corpus/wmt_zh_en_training_corpus.en.txt
-# head data/raw/wmt_zh_en_training_corpus/wmt_zh_en_training_corpus.zh.txt
-if __name__ == "__main__":
+def test_wmt():
     print("=== 迭代前5条中英文对 ===")
     for i, (zh, en) in enumerate(iter_wmt_zh_en_pairs(limit=5)):
         print(f"{i+1}\t{zh}\t{en}")
@@ -98,3 +95,39 @@ if __name__ == "__main__":
     print("\n=== 迭代前5条英文 ===")
     for i, en in enumerate(iter_wmt_en(limit=5)):
         print(f"{i+1}\t{en}")
+
+def filter_owt(path):
+    return path.startswith("webtext2-") and path.endswith(".parquet")
+
+def iter_owt_en(limit: int = -1):
+    owt_dir = "data/raw/openwebtext2"
+    count = 0
+
+    for filename in sorted(filter(filter_owt, os.listdir(owt_dir))):
+        file_path = os.path.join(owt_dir, filename)
+
+        table = pq.read_table(file_path, columns=["text"])
+
+        for batch in table.to_batches(max_chunksize=1024):
+            for text in batch.column(0).to_pylist():
+                if text is None:
+                    continue
+
+                text = " ".join(text.split())
+
+                yield text
+                count += 1
+
+                if limit != -1 and count >= limit:
+                    return
+
+def test_owt():
+    print("=== 迭代前5条 OpenWebText2 英文 ===")
+    for i, text in enumerate(iter_owt_en(limit=5)):
+        print(f"{i+1}\t{text}")
+
+# head data/raw/wmt_zh_en_training_corpus/wmt_zh_en_training_corpus.txt
+# head data/raw/wmt_zh_en_training_corpus/wmt_zh_en_training_corpus.en.txt
+# head data/raw/wmt_zh_en_training_corpus/wmt_zh_en_training_corpus.zh.txt
+if __name__ == "__main__":
+    test_wmt()

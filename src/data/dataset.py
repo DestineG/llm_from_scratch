@@ -1,11 +1,12 @@
 # src/data/dataset.py
 
+from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 from src.tokenizer.basic import build_tokenizer_from_wmt_en
 from src.tokenizer.bpe import build_bpe_tokenizer
-from .rawdata_handler import iter_wmt_en
+from .rawdata_handler import iter_wmt_en, iter_owt_en
 
 class BasicDataset(Dataset):
     def __init__(self, window_size: int = 8, tokenizer=None, text_list=None):
@@ -17,12 +18,12 @@ class BasicDataset(Dataset):
 
     def build_data(self):
         all_ids = []
-        for text in self.text_list:
+        eot_id = self.tokenizer.eot_token  # GPT-2 的结束符 ID
+
+        for text in tqdm(self.text_list, desc="Encoding texts", ascii=True):
             all_ids.extend(self.tokenizer.encode(text))
-            if hasattr(self.tokenizer, "eot_token"):
-                all_ids.append(self.tokenizer.eot_token)
-            else:
-                all_ids.extend(self.tokenizer.encode("<eos>"))
+            all_ids.append(eot_id)
+
         return all_ids
 
     def __len__(self):
@@ -33,17 +34,26 @@ class BasicDataset(Dataset):
         return (len(self.data_ids) - 1) // self.window_size
 
     def __getitem__(self, idx):
-        # 计算当前 chunk 的起始位置
         start = idx * self.window_size
-        end = start + self.window_size
-        
-        # 构造输入和目标
-        # Input:  [0, 1, 2, 3]
-        # Target: [1, 2, 3, 4] (预测下一个 token)
-        input_seq = self.data_ids[start : end]
-        target_seq = self.data_ids[start + 1 : end + 1]
-        
-        return torch.tensor(input_seq), torch.tensor(target_seq)
+        end = start + self.window_size + 1
+
+        chunk = self.data_ids[start:end]
+
+        # 不够长，跳过
+        if len(chunk) < self.window_size + 1:
+            return self.__getitem__((idx + 1) % len(self))
+
+        eot = self.tokenizer.eot_token
+
+        # 如果在输入区间内出现 EOT，丢弃这个样本
+        if eot in chunk[:-1]:
+            return self.__getitem__((idx + 1) % len(self))
+
+        x = chunk[:-1]
+        y = chunk[1:]
+
+        return torch.tensor(x), torch.tensor(y)
+
 
     def debug_sample(self, idx):
         """垂直对齐打印调试信息"""
@@ -71,6 +81,16 @@ def build_dataloader_from_wmt_en_bpeTokenizer(
     tokenizer = build_bpe_tokenizer(model_name=bpe_model_name)
     tokenizer.customName = "bpe_" + bpe_model_name
     text_list = list(iter_wmt_en(seq_nums))
+    dataset = BasicDataset(window_size=window_size, tokenizer=tokenizer, text_list=text_list)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+    return dataloader, tokenizer
+
+def build_dataloader_from_owt_en_bpeTokenizer(
+        text_nums: int = 10000, window_size: int = 8, batch_size: int = 32,
+        num_workers: int = 0, shuffle: bool = True, bpe_model_name: str = "gpt2"):
+    tokenizer = build_bpe_tokenizer(model_name=bpe_model_name)
+    tokenizer.customName = "bpe_" + bpe_model_name
+    text_list = list(iter_owt_en(text_nums))
     dataset = BasicDataset(window_size=window_size, tokenizer=tokenizer, text_list=text_list)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     return dataloader, tokenizer
