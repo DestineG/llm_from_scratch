@@ -3,216 +3,183 @@
 import os
 import math
 import shutil
-from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
+from dataclasses import dataclass, field
+from typing import Dict, Any
+
 import torch
-from torch.optim.lr_scheduler import LambdaLR
-from src.data.dataset import build_dataloader_from_wmt_en_basicTokenizer, build_dataloader_from_wmt_en_bpeTokenizer, build_dataloader_from_owt_en_bpeTokenizer
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+
+from src.data.dataset import build_dataloader_from_owt_en_bpeTokenizer
 from src.model.gpt import GPT
 
+@dataclass
+class TrainConfig:
+    # 实验设置
+    exp_name: str = "gpt_owt_en_bpeTokenizer_with_warmup_v2"
+    exps_dir: str = "./experiments"
+    
+    # 训练超参数
+    epochs: int = 1
+    batch_size: int = 64
+    lr: float = 3e-4
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.05
+    
+    # 间隔设置
+    save_steps: int = 100000
+    log_steps: int = 500
+    
+    # 模型配置
+    model_params: Dict[str, Any] = field(default_factory=lambda: {
+        "embed_dim": 768,
+        "seq_len": 128,
+        "num_heads": 12,
+        "ff_dim": 3072,
+        "num_layers": 8,
+    })
 
-def get_cosine_schedule_with_warmup(
-    optimizer,
-    num_warmup_steps=2000,
-    num_training_steps=None,
-    min_lr_ratio=0.1,
-):
-    def lr_lambda(current_step):
-        # Warmup阶段：线性从0升至1
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
+    def __post_init__(self):
+        self.exp_dir = os.path.abspath(os.path.join(self.exps_dir, self.exp_name))
+        self.checkpoint_dir = os.path.join(self.exp_dir, "checkpoints")
+        self.log_path = os.path.join(self.exp_dir, "training_log.txt")
+
+
+class Trainer:
+    def __init__(self, config: TrainConfig, device: torch.device):
+        self.config = config
+        self.device = device
+        self.global_step = 0
         
-        # 超过总步数：LR固定为0
-        if current_step >= num_training_steps:
-            return 0.0
+        # 初始化工作目录
+        self._prepare_dirs()
         
-        # Cosine衰减阶段：从1衰减至0.05，衰减曲线为cos[0, pi]
-        # progress 从 0 -> 1
-        progress = float(current_step - num_warmup_steps) / float(
-            max(1, num_training_steps - num_warmup_steps)
+        # 加载数据与分词器
+        self.dataloader, self.tokenizer = self._setup_data()
+        
+        # 更新并初始化模型
+        self.config.model_params["vocab_size"] = self.tokenizer.n_vocab
+        self.model = GPT(**self.config.model_params).to(self.device)
+        
+        # 优化器与调度器
+        self.criterion = torch.nn.CrossEntropyLoss()
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(), 
+            lr=self.config.lr, 
+            weight_decay=self.config.weight_decay
         )
-        cosine_decay = min_lr_ratio + (1.0 - min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
-        return max(0.0, cosine_decay)
-    return LambdaLR(optimizer, lr_lambda)
+        self.scheduler = self._get_scheduler()
+        
+        # 记录器
+        self.writer = SummaryWriter(os.path.join(self.config.exp_dir, 'tensorboard_logs'))
+        self._log_experiment_config()
 
+    def _prepare_dirs(self):
+        if os.path.exists(self.config.exp_dir):
+            shutil.rmtree(self.config.exp_dir)
+        os.makedirs(self.config.checkpoint_dir, exist_ok=True)
 
-def log_experiment_config(
-    log_path,
-    exp_name,
-    device,
-    epochs,
-    model_config,
-    tokenizer,
-):
-    with open(log_path, "w") as f:  # 用 "w"，确保是新实验
-        f.write("========== Experiment Config ==========\n")
-        f.write(f"Experiment: {exp_name}\n")
-        f.write(f"Device: {device}\n")
-        f.write(f"Epochs: {epochs}\n")
-        f.write(f"Save steps: {save_steps}\n")
-        f.write(f"Log steps: {log_steps}\n\n")
-
-        f.write("Model Config:\n")
-        for k, v in model_config.items():
-            f.write(f"  {k}: {v}\n")
-
-        f.write("\nTokenizer:\n")
-        f.write(f"  type: {tokenizer.customName}\n")
-        f.write(f"  vocab_size: {tokenizer.n_vocab}\n")
-
-        f.write("=======================================\n\n")
-
-
-def train_one_epoch(
-    model,
-    dataloader,
-    optimizer,
-    criterion,
-    device,
-    global_step,
-    epoch,
-    epochs,
-    tokenizer,
-    scheduler,
-    writer,
-):
-    model.train()
-    total_loss = 0.0
-
-    batch_bar = tqdm(
-        dataloader,
-        desc=f"Epoch [{epoch+1}/{epochs}]",
-        ascii=True,
-        leave=False,
-    )
-
-    for batch in batch_bar:
-        inputs, targets = batch
-        inputs = inputs.to(device)
-        targets = targets.to(device)
-
-        optimizer.zero_grad()
-        outputs = model(inputs)
-
-        loss = criterion(
-            outputs.view(-1, outputs.size(-1)),
-            targets.view(-1)
+    def _setup_data(self):
+        return build_dataloader_from_owt_en_bpeTokenizer(
+            text_nums=10000,
+            window_size=self.config.model_params["seq_len"],
+            batch_size=self.config.batch_size,
+            num_workers=4,
+            shuffle=True,
+            bpe_model_name="gpt2"
         )
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
 
-        total_loss += loss.item()
-        global_step += 1
+    def _get_scheduler(self):
+        total_steps = len(self.dataloader) * self.config.epochs
+        warmup_steps = int(self.config.warmup_ratio * total_steps)
+        
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                return float(current_step) / float(max(1, warmup_steps))
+            if current_step >= total_steps:
+                return 0.0
+            
+            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            min_lr_ratio = 0.01
+            cosine_decay = min_lr_ratio + (1.0 - min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
+            return max(0.0, cosine_decay)
 
-        batch_bar.set_postfix({
-            "avg_loss": f"{total_loss / (batch_bar.n + 1):.4f}",
-            "step": global_step
-        })
-        if global_step % log_steps == 0:
-            os.makedirs(exp_dir, exist_ok=True)
+        return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
 
-            with open(log_path, "a") as f:
-                f.write(
-                    f"Step {global_step}, Loss: {loss.item():.4f}, LR: {scheduler.get_last_lr()[0]:.2e}\n"
-                    f"Inputs: {tokenizer.decode(inputs[0].cpu().numpy().tolist())}\n"
-                    f"Outputs: {tokenizer.decode(torch.argmax(outputs[0], dim=-1).cpu().numpy().tolist())}\n"
-                    f"Targets: {tokenizer.decode(targets[0].cpu().numpy().tolist())}\n\n"
-                )
-                writer.add_scalar('Training Loss', loss.item(), global_step)
-                writer.add_scalar('Learning Rate', scheduler.get_last_lr()[0], global_step)
+    def _log_experiment_config(self):
+        with open(self.config.log_path, "w") as f:
+            f.write("========== Experiment Config ==========\n")
+            f.write(f"Experiment: {self.config.exp_name}\n")
+            f.write(f"Device: {self.device}\n")
+            f.write(f"Total Epochs: {self.config.epochs}\n\n")
+            f.write("Model Config:\n")
+            for k, v in self.config.model_params.items():
+                f.write(f"  {k}: {v}\n")
+            f.write(f"\nTokenizer: {self.tokenizer.customName}\n")
+            f.write("=======================================\n\n")
 
-        if global_step % save_steps == 0:
-            os.makedirs(checkpoint_dir, exist_ok=True)
-
-            checkpoint_path = os.path.join(
-                checkpoint_dir, f"model_step_{global_step}.pt"
+    def train(self):
+        for epoch in range(self.config.epochs):
+            self.model.train()
+            total_loss = 0.0
+            
+            batch_bar = tqdm(
+                self.dataloader, 
+                desc=f"Epoch [{epoch+1}/{self.config.epochs}]", 
+                ascii=True, leave=False
             )
-            torch.save(model.state_dict(), checkpoint_path)
 
-    avg_loss = total_loss / len(dataloader)
-    return avg_loss, global_step
+            for batch in batch_bar:
+                inputs, targets = [get.to(self.device) for get in batch]
 
-model_config = {
-    "vocab_size": 50000,
-    "embed_dim": 768,
-    "seq_len": 128,
-    "num_heads": 12,
-    "ff_dim": 3072,
-    "num_layers": 8,
-}
-save_steps = 20000
-log_steps = 500
-exps_dir = "./experiments"
-exp_name = "gpt_owt_en_bpeTokenizer_with_warmup_v2"
-exp_dir = os.path.abspath(os.path.join(exps_dir, exp_name))
-if os.path.exists(exp_dir):
-    shutil.rmtree(exp_dir)   # 删除整个目录（包括所有文件和子目录）
-os.makedirs(exp_dir)
-checkpoint_dir = os.path.join(exp_dir, "checkpoints")
-log_path = os.path.join(exp_dir, "training_log.txt")
-epochs=500
-lr = 3e-4
-def train(device):
-    # dataloader, tokenizer = build_dataloader_from_wmt_en_basicTokenizer(
-    #     seq_nums=1000000, vocab_size=model_config.get("vocab_size"),
-    #     window_size=model_config.get("seq_len"), batch_size=64, num_workers=4, shuffle=True,
-    # )
-    # dataloader, tokenizer = build_dataloader_from_wmt_en_bpeTokenizer(
-    #     seq_nums=1000000, window_size=model_config.get("seq_len"), batch_size=64,
-    #     num_workers=4, shuffle=True, bpe_model_name="gpt2"
-    # )
+                self.optimizer.zero_grad()
+                outputs = self.model(inputs)
+                
+                loss = self.criterion(outputs.view(-1, outputs.size(-1)), targets.view(-1))
+                loss.backward()
+                self.optimizer.step()
+                self.scheduler.step()
 
-    dataloader, tokenizer = build_dataloader_from_owt_en_bpeTokenizer(
-        text_nums=10000, window_size=model_config.get("seq_len"), batch_size=64,
-        num_workers=4, shuffle=True, bpe_model_name="gpt2"
-    )
+                self.global_step += 1
+                total_loss += loss.item()
+                
+                # 更新进度条
+                batch_bar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{self.scheduler.get_last_lr()[0]:.2e}"})
 
-    model_config.update({"vocab_size": tokenizer.n_vocab})
+                # 定期记录
+                if self.global_step % self.config.log_steps == 0:
+                    self._record_metrics(loss.item(), inputs[0], outputs[0], targets[0])
 
-    model = GPT(**model_config).to(device)
-    criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-    total_steps = len(dataloader) * epochs
-    # Warmup 步数通常设为总步数的 1% 到 5%
-    warmup_steps = int(0.05 * total_steps)
-    scheduler = get_cosine_schedule_with_warmup(
-            optimizer, 
-            num_warmup_steps=warmup_steps, 
-            num_training_steps=total_steps
-        )
+                # 定期保存
+                if self.global_step % self.config.save_steps == 0:
+                    self._save_checkpoint()
 
-    # 记录实验配置
-    log_experiment_config(
-        log_path,
-        exp_name,
-        device,
-        epochs,
-        model_config,
-        tokenizer,
-    )
+        # 训练结束，保存最终模型
+        self._save_final_model()
 
-    # 创建 TensorBoard 记录器
-    writer = SummaryWriter(os.path.join(exp_dir, 'tensorboard_logs'))
+    def _record_metrics(self, loss, sample_in, sample_out, sample_target):
+        # 写入文本日志
+        with open(self.config.log_path, "a") as f:
+            f.write(f"Step {self.global_step}, Loss: {loss:.4f}, LR: {self.scheduler.get_last_lr()[0]:.2e}\n"
+                    f"In:  {self.tokenizer.decode(sample_in.cpu().tolist())[:100]}...\n"
+                    f"Target: {self.tokenizer.decode(sample_target.cpu().tolist())[:100]}...\n"
+                    f"Out: {self.tokenizer.decode(torch.argmax(sample_out, dim=-1).cpu().tolist())[:100]}...\n\n")
+        
+        # Tensorboard
+        self.writer.add_scalar('Loss/train', loss, self.global_step)
+        self.writer.add_scalar('LR', self.scheduler.get_last_lr()[0], self.global_step)
 
-    global_step = 0
-
-    for epoch in range(epochs):
-        avg_loss, global_step = train_one_epoch(
-            model,
-            dataloader,
-            optimizer,
-            criterion,
-            device,
-            global_step,
-            epoch,
-            epochs,
-            tokenizer,
-            scheduler,
-            writer,
-        )
+    def _save_checkpoint(self):
+        path = os.path.join(self.config.checkpoint_dir, f"model_step_{self.global_step}.pt")
+        torch.save(self.model.state_dict(), path)
+    
+    def _save_final_model(self):
+        path = os.path.join(self.config.checkpoint_dir, "model_final.pt")
+        torch.save(self.model.state_dict(), path)
 
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train(device=device)
+    config = TrainConfig()
+    trainer = Trainer(config, device)
+    trainer.train()
