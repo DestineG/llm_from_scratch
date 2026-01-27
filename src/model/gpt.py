@@ -8,6 +8,8 @@ from .transformer import TransformerBlock
 class GPT(nn.Module):
     def __init__(self, vocab_size, embed_dim, seq_len, num_heads, ff_dim, num_layers):
         super(GPT, self).__init__()
+
+        self.embed_dim = embed_dim
         
         # 词向量与位置向量
         self.embedding = BasicEmbedding(vocab_size, embed_dim, seq_len)
@@ -39,7 +41,7 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     # (batch_size, seq_len) -> (batch_size, seq_len, vocab_size)
-    def forward(self, idx):
+    def forward(self, idx, return_hidden=False):
         # (batch_size, seq_len) -> (batch_size, seq_len, embed_dim)
         x = self.embedding(idx)
         
@@ -49,6 +51,9 @@ class GPT(nn.Module):
         
         # (batch_size, seq_len, embed_dim) -> (batch_size, seq_len, embed_dim)
         x = self.ln_f(x)
+
+        if return_hidden:
+                return x  # 直接返回 (batch, seq_len, 768)
 
         # (batch_size, seq_len, embed_dim) -> (batch_size, seq_len, vocab_size)
         logits = self.lm_head(x)

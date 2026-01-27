@@ -1,4 +1,4 @@
-# src/train/trainer.py
+# src/train/trainer_classification.py
 
 import os
 import math
@@ -10,25 +10,26 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.data.dataset import build_dataloader_from_owt_en_bpeTokenizer
+from src.data.dataset import build_dataloader_from_owt_en_bpeTokenizer, build_imdb_classification_dataloader
 from src.model.gpt import GPT
+from src.model.gpt_classification import GPTForClassification
 
 @dataclass
 class TrainConfig:
     # 实验设置
-    exp_name: str = "gpt_owt_en_bpeTokenizer_with_warmup_v2"
+    exp_name: str = "gpt_classification_imdb_bpeTokenizer_with_warmup"
     exps_dir: str = "./experiments"
     
     # 训练超参数
-    epochs: int = 1000
+    epochs: int = 100
     batch_size: int = 64
-    lr: float = 3e-4
+    lr: float = 3e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.05
     
     # 间隔设置
-    save_steps: int = 100000
-    log_steps: int = 500
+    save_steps: int = 1000
+    log_steps: int = 50
     
     # 模型配置
     model_params: Dict[str, Any] = field(default_factory=lambda: {
@@ -55,12 +56,15 @@ class Trainer:
         self._prepare_dirs()
         
         # 加载数据与分词器
-        self.dataloader, self.tokenizer = self._setup_data()
+        self.train_dataloader, self.test_dataloader, self.tokenizer = self._setup_data()
         
         # 更新并初始化模型
+        modelWeightsPath = "./experiments/gpt_owt_en_bpeTokenizer_with_warmup_v2/checkpoints/model_final.pt"
         self.config.model_params["vocab_size"] = self.tokenizer.n_vocab
-        self.model = GPT(**self.config.model_params).to(self.device)
-        
+        pretrained_gpt = GPT(**self.config.model_params).to(self.device)
+        pretrained_gpt.load_state_dict(torch.load(modelWeightsPath))
+        self.model = GPTForClassification(pretrained_gpt, num_classes=2).to(self.device)
+
         # 优化器与调度器
         self.criterion = torch.nn.CrossEntropyLoss()
         self.optimizer = torch.optim.AdamW(
@@ -80,17 +84,26 @@ class Trainer:
         os.makedirs(self.config.checkpoint_dir, exist_ok=True)
 
     def _setup_data(self):
-        return build_dataloader_from_owt_en_bpeTokenizer(
-            text_nums=10000,
-            window_size=self.config.model_params["seq_len"],
+        train_dataloader, tokenizer = build_imdb_classification_dataloader(
             batch_size=self.config.batch_size,
+            max_len=self.config.model_params["seq_len"],
             num_workers=4,
             shuffle=True,
+            split="train",
             bpe_model_name="gpt2"
         )
+        test_dataloader, _ = build_imdb_classification_dataloader(
+            batch_size=self.config.batch_size,
+            max_len=self.config.model_params["seq_len"],
+            num_workers=4,
+            shuffle=False,
+            split="test",
+            bpe_model_name="gpt2"
+        )
+        return train_dataloader, test_dataloader, tokenizer
 
     def _get_scheduler(self):
-        total_steps = len(self.dataloader) * self.config.epochs
+        total_steps = len(self.train_dataloader) * self.config.epochs
         warmup_steps = int(self.config.warmup_ratio * total_steps)
         
         def lr_lambda(current_step):
@@ -124,7 +137,7 @@ class Trainer:
             total_loss = 0.0
             
             batch_bar = tqdm(
-                self.dataloader, 
+                self.train_dataloader, 
                 desc=f"Epoch [{epoch+1}/{self.config.epochs}]", 
                 ascii=True, leave=False
             )
@@ -135,7 +148,7 @@ class Trainer:
                 self.optimizer.zero_grad()
                 outputs = self.model(inputs)
                 
-                loss = self.criterion(outputs.view(-1, outputs.size(-1)), targets.view(-1))
+                loss = self.criterion(outputs, targets)
                 loss.backward()
                 self.optimizer.step()
                 self.scheduler.step()
@@ -153,21 +166,24 @@ class Trainer:
                 # 定期保存
                 if self.global_step % self.config.save_steps == 0:
                     self._save_checkpoint()
+            self._test()
 
         # 训练结束，保存最终模型
         self._save_final_model()
 
     def _record_metrics(self, loss, sample_in, sample_out, sample_target):
-        # 写入文本日志
+        # sample_out 是分类的 logits，取 argmax 得到预测结果
+        pred = torch.argmax(sample_out, dim=-1).item()
+        target = sample_target.item()
+        
         with open(self.config.log_path, "a") as f:
             f.write(f"Step {self.global_step}, Loss: {loss:.4f}, LR: {self.scheduler.get_last_lr()[0]:.2e}\n"
-                    f"In:  {self.tokenizer.decode(sample_in.cpu().tolist())[:100]}...\n"
-                    f"Target: {self.tokenizer.decode(sample_target.cpu().tolist())[:100]}...\n"
-                    f"Out: {self.tokenizer.decode(torch.argmax(sample_out, dim=-1).cpu().tolist())[:100]}...\n\n")
+                    f"Input Text: {self.tokenizer.decode(sample_in.cpu().tolist()[-20:])}...\n"
+                    f"Target Label: {target} | Prediction: {pred}\n\n")
         
-        # Tensorboard
-        self.writer.add_scalar('Loss/train', loss, self.global_step)
-        self.writer.add_scalar('LR', self.scheduler.get_last_lr()[0], self.global_step)
+        # Tensorboard 记录
+        self.writer.add_scalar('train/Loss', loss, self.global_step)
+        self.writer.add_scalar('train/Learning_Rate', self.scheduler.get_last_lr()[0], self.global_step)
 
     def _save_checkpoint(self):
         path = os.path.join(self.config.checkpoint_dir, f"model_step_{self.global_step}.pt")
@@ -176,6 +192,27 @@ class Trainer:
     def _save_final_model(self):
         path = os.path.join(self.config.checkpoint_dir, "model_final.pt")
         torch.save(self.model.state_dict(), path)
+    
+    def _test(self):
+        self.model.eval()
+        correct = 0
+        total = 0
+        batch_bar = tqdm(
+            self.test_dataloader,desc="Testing",
+            ascii=True, leave=False
+        )
+        with torch.no_grad():
+            for batch in batch_bar:
+                inputs, targets = [get.to(self.device) for get in batch]
+                outputs = self.model(inputs)
+                preds = torch.argmax(outputs, dim=-1)
+                
+                correct += (preds == targets).sum().item()
+                total += targets.size(0)
+                batch_bar.set_postfix({"Accuracy": f"{(correct / total) * 100:.2f}%"})
+        
+        accuracy = correct / total
+        self.writer.add_scalar('test/Accuracy', accuracy, self.global_step)
 
 
 if __name__ == "__main__":

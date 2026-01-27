@@ -5,20 +5,21 @@ import torch.nn.functional as F
 
 from src.model.gpt import GPT
 from src.tokenizer.bpe import build_bpe_tokenizer
-from src.train.trainer import model_config
+from src.train.trainer import TrainConfig
 
 # -------------------------------
 # 配置
 # -------------------------------
-pretrained_model_path = "experiments/gpt_owt_en_bpeTokenizer_with_warmup_v2/checkpoints/model_step_1340000.pt"
+pretrained_model_path = "experiments/gpt_owt_en_bpeTokenizer_with_warmup_v2/checkpoints/model_step_2700000.pt"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # -------------------------------
 # 初始化 tokenizer 和模型
 # -------------------------------
 tokenizer = build_bpe_tokenizer(model_name="gpt2")
-model_config.update({"vocab_size": tokenizer.n_vocab})
-model = GPT(**model_config).to(device)
+model_config = TrainConfig()
+model_config.model_params["vocab_size"] = tokenizer.n_vocab
+model = GPT(**model_config.model_params).to(device)
 model.load_state_dict(torch.load(pretrained_model_path, map_location=device))
 embedding_layer = model.embedding.token_embedding
 embedding_layer.eval()

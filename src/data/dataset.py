@@ -3,6 +3,7 @@
 from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset, DataLoader
+from datasets import load_dataset
 
 from src.tokenizer.basic import build_tokenizer_from_wmt_en
 from src.tokenizer.bpe import build_bpe_tokenizer
@@ -96,18 +97,18 @@ def build_dataloader_from_owt_en_bpeTokenizer(
     return dataloader, tokenizer
 
 def test():
-    # 测试 BasicDataloader
-    dataloader, tokenizer = build_dataloader_from_wmt_en_basicTokenizer(
-        seq_nums=1000, vocab_size=1000, window_size=16,
-        batch_size=4, num_workers=0, shuffle=False
-    )
-    print(f"Vocabulary Size: {tokenizer.n_vocab}")
-    for i, (inputs, targets) in enumerate(dataloader):
-        print(f"Batch {i}:")
-        print("Inputs:", inputs)
-        print("Targets:", targets)
-        if i >= 2:
-            break
+    # # 测试 BasicDataloader
+    # dataloader, tokenizer = build_dataloader_from_wmt_en_basicTokenizer(
+    #     seq_nums=1000, vocab_size=1000, window_size=16,
+    #     batch_size=4, num_workers=0, shuffle=False
+    # )
+    # print(f"Vocabulary Size: {tokenizer.n_vocab}")
+    # for i, (inputs, targets) in enumerate(dataloader):
+    #     if i >= 1:
+    #         break
+    #     print(f"Batch {i}:")
+    #     print("Inputs:", inputs.shape)
+    #     print("Targets:", targets.shape)
     
     # 测试 BPE Dataloader
     dataloader_bpe, tokenizer_bpe = build_dataloader_from_wmt_en_bpeTokenizer(
@@ -115,14 +116,96 @@ def test():
         batch_size=4, num_workers=0, shuffle=False,
         bpe_model_name="gpt2"
     )
+    print(f"\nlength of set: {len(dataloader_bpe.dataset)}")
     print(f"\nBPE Vocabulary Size: {tokenizer_bpe.n_vocab}")
     for i, (inputs, targets) in enumerate(dataloader_bpe):
-        print(f"Batch {i}:")
-        print("Inputs:", inputs)
-        print("Targets:", targets)
-        if i >= 2:
+        if i >= 1:
             break
+        print(f"Batch {i}:")
+        print("Inputs:", inputs.shape)
+        print("Targets:", targets.shape)
+    
+    # 测试 IMDB
+    dataloader_bpe, tokenizer_bpe = build_imdb_classification_dataloader(
+        batch_size=32, max_len=128,
+        num_workers=4, shuffle=True, split="train"
+    )
+    print(f"\nlength of train set: {len(dataloader_bpe.dataset)}")
+    print(f"\nBPE Vocabulary Size: {tokenizer_bpe.n_vocab}")
+    for i, (inputs, targets) in enumerate(dataloader_bpe):
+        if i >= 1:
+            break
+        print(f"Batch {i}:")
+        print("Inputs:", inputs.shape)
+        print("Targets:", targets.shape)
 
+    dataloader_bpe, tokenizer_bpe = build_imdb_classification_dataloader(
+        batch_size=32, max_len=128,
+        num_workers=4, shuffle=False, split="test"
+    )
+    print(f"\nlength of test set: {len(dataloader_bpe.dataset)}")
+    print(f"\nBPE Vocabulary Size: {tokenizer_bpe.n_vocab}")
+    for i, (inputs, targets) in enumerate(dataloader_bpe):
+        if i >= 1:
+            break
+        print(f"Batch {i}:")
+        print("Inputs:", inputs.shape)
+        print("Targets:", targets.shape)
+
+
+class IMDBClassificationDataset(Dataset):
+    def __init__(self, tokenizer, split="train", max_len=128):
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+        print(f"Loading IMDb {split} dataset...")
+        data_dir = 'data/raw/imdb'
+        data_files = {
+            'train': f'{data_dir}/train-00000-of-00001.parquet',
+            'test': f'{data_dir}/test-00000-of-00001.parquet'
+        }
+        self.dataset = load_dataset("parquet", data_files=data_files)[split]
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        text = item['text']
+        label = item['label']
+
+        # 编码文本
+        ids = self.tokenizer.encode(text)
+        
+        # 截断
+        if len(ids) > self.max_len:
+            ids = ids[:self.max_len]
+        
+        # 左填充 (Left Padding)
+        # 注意：GPT2 默认没有专门的 pad_token，通常复用 eot_token
+        pad_id = self.tokenizer.eot_token 
+        padding_len = self.max_len - len(ids)
+        ids = [pad_id] * padding_len + ids
+
+        return torch.tensor(ids), torch.tensor(label)
+
+def build_imdb_classification_dataloader(
+        batch_size: int = 32, max_len: int = 128, num_workers: int = 0,
+        shuffle: bool = True, split: str = "train", bpe_model_name: str = "gpt2"):
+    
+    # 复用你现有的 BPE Tokenizer 加载逻辑
+    tokenizer = build_bpe_tokenizer(model_name=bpe_model_name)
+    tokenizer.customName = "bpe_" + bpe_model_name + "_imdb"
+    
+    dataset = IMDBClassificationDataset(tokenizer=tokenizer, split=split, max_len=max_len)
+    
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
+        num_workers=num_workers
+    )
+    return dataloader, tokenizer
 
 if __name__ == "__main__":
     test()
