@@ -7,8 +7,5 @@
 
 ## Todo
 
-- 训练一份勉强能看的 GPT 权重
-- Temperature + topK(P138)
-- 分类微调(P156)
 - SFT微调(P185)
 - LoRA 微调(P282 P294)
