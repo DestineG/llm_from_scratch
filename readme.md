@@ -9,3 +9,6 @@
 
 - SFT微调(P185)
 - LoRA 微调(P282 P294)
+
+## 项目快照
+- [百度云盘链接](https://pan.baidu.com/s/1lViMA5Xpy0teQwJ0vx4rMQ?pwd=dib2) 提取码: dib2
